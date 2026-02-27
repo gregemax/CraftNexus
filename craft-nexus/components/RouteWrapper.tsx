@@ -17,16 +17,15 @@ function RouteWrapperComponent({ children }: RouteWrapperProps) {
   const pathname = usePathname();
   
   // Routes where navigation and footer should be hidden
-  const isOnboardingRoute = useMemo(() => 
-    pathname.startsWith("/sell/onboarding"), 
-    [pathname]
-  );
+  const isHiddenRoute = useMemo(() => {
+    return pathname.startsWith("/sell/onboarding") || pathname === "/sell/login";
+  }, [pathname]);
   
   return (
     <>
-      {!isOnboardingRoute && <Navigation />}
+      {!isHiddenRoute && <Navigation />}
       {children}
-      {!isOnboardingRoute && <Footer />}
+      {!isHiddenRoute && <Footer />}
     </>
   );
 }

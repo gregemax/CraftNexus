@@ -157,6 +157,17 @@ export class EscrowContractService {
     }
 
     try {
+      // Use buyer, seller, token, and other variables if needed in the future
+      if (!params.buyer || !params.seller || !params.token) {
+        throw new Error("Missing required escrow parameters");
+      }
+
+      // Convert amount to stroops (1 USDC = 10,000,000 stroops)
+      const amountStroops = BigInt(Math.floor(parseFloat(params.amount) * 10_000_000));
+      const window = params.releaseWindow || 604800; // 7 days default
+
+      console.log(`Creating escrow: amount=${amountStroops}, window=${window}, orderId=${params.orderId}`);
+
       // Note: This is a simplified example
       // In production, you'll need to:
       // 1. Build a transaction
@@ -183,6 +194,7 @@ export class EscrowContractService {
     try {
       // Note: This is a placeholder
       // In production, you would build and submit the transaction
+      console.log(`Simulating release funds for Order ID: ${orderId} by Secret: ${signerSecret.substring(0, 5)}...`);
 
       return "transaction_hash_placeholder";
     } catch (error) {
