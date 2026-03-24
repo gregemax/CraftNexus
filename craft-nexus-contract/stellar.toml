@@ -1,20 +1,48 @@
-# Stellar Network Configuration for CraftNexus
+[contract]
+name = "Escrow Contract"
+version = "1.0.0"
+description = "Decentralized escrow platform for Stellar/Soroban"
 
-NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
-HORIZON_URL = "https://horizon-testnet.stellar.org"
-SOROBAN_RPC_URL = "https://soroban-testnet.stellar.org:443"
+[author]
+name = "CraftNexus Team"
+email = "dev@project.com"
+github = "https://github.com/Hub-of-Evolution/CraftNexus"
 
-[QUOTES]
-ASSET_CODE = "USDC"
-ISSUER = "GBBD67V63DU7P3WGZ2SQEKBWAYD5S64Y6L2SGVVQQZNCZ7Y7XNR22TH3" # Random/Testnet USDC
+[contracts.main]
+wasm = "target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm"
+hash = "0x..."
+id_futurenet = "0x..."
+id_mainnet = "0x..."
 
-[[CURRENCIES]]
+[docs]
+homepage = "https://craftnexus.com"
+repository = "https://github.com/Hub-of-Evolution/CraftNexus"
+contract_readme = "https://github.com/Hub-of-Evolution/CraftNexus/blob/main/craft-nexus-contract/README.md"
+
+[networks.testnet]
+network_passphrase = "Test SDF Network ; September 2015"
+horizon_url = "https://horizon-testnet.stellar.org"
+soroban_rpc_url = "https://soroban-testnet.stellar.org:443"
+
+[networks.mainnet]
+network_passphrase = "Public Global Stellar Network ; September 2015"
+horizon_url = "https://horizon.stellar.org"
+soroban_rpc_url = "https://soroban-rpc.mainnet.stellar.org:443"
+
+[dependencies]
+soroban_sdk = "21.0.0"
+
+[quotes]
+asset_code = "USDC"
+issuer = "GBBD67V63DU7P3WGZ2SQEKBWAYD5S64Y6L2SGVVQQZNCZ7Y7XNR22TH3"
+
+[[currencies]]
 code = "USDC"
 issuer = "GBBD67V63DU7P3WGZ2SQEKBWAYD5S64Y6L2SGVVQQZNCZ7Y7XNR22TH3"
 display_decimals = 7
 name = "USD Coin"
 
-[DOCUMENTATION]
-ORG_NAME = "CraftNexus"
-ORG_URL = "https://craftnexus.com"
-ORG_DESCRIPTION = "Secure Escrow Service on Stellar"
+[documentation]
+org_name = "CraftNexus"
+org_url = "https://craftnexus.com"
+org_description = "Secure Escrow Service on Stellar"
