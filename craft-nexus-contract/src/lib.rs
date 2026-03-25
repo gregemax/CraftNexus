@@ -213,7 +213,7 @@ impl EscrowContract {
 
     pub fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
         if amount <= 0 {
-            return Err(Error::InvalidAmount);
+            return Err(Error::AmountBelowMinimum);
         }
         
         let min_amount: i128 = env.storage().persistent()
@@ -221,7 +221,7 @@ impl EscrowContract {
             .unwrap_or(0); // If not set, allow any positive amount
         
         if amount < min_amount {
-            return Err(Error::InvalidAmount);
+            return Err(Error::AmountBelowMinimum);
         }
         
         Ok(())
