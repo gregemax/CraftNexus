@@ -8,11 +8,16 @@ Stellar Smart Contracts (Soroban) for the CraftNexus marketplace platform.
 - [Contracts](#contracts)
   - [Onboarding Contract](#onboarding-contract)
   - [Escrow Contract](#escrow-contract)
+- [Storage Architecture](#storage-architecture)
+- [Event Reference](#event-reference)
+- [Error Codes](#error-codes)
 - [Prerequisites](#prerequisites)
-- [Installation](#installation)
 - [Building Contracts](#building-contracts)
 - [Deployment](#deployment)
+- [Testing Contracts](#testing-contracts)
+- [Integration](#integration)
 - [Contract Addresses](#contract-addresses)
+- [Security Considerations](#security-considerations)
 
 ---
 
@@ -376,9 +381,9 @@ The contract emits the following events for tracking:
 
 | Event | Description | Data Emitted |
 |-------|-------------|--------------|
-| `UserOnboarded` | User successfully registers | `(user_address, username, role)` |
-| `RoleUpdated` | User role changes | `(user_address, old_role, new_role)` |
-| `UserVerified` | User verification status changed | `(user_address)` |
+| `UserOnboarded` | User successfully registers | `Address` (the onboarded user) |
+| `RoleUpdated` | User role changes | `Address` (the updated user) |
+| `UserVerified` | User verification status changed | `Address` (the verified user) |
 
 ---
 
@@ -487,6 +492,85 @@ Check if escrow can be auto-released.
 
 ---
 
+## Storage Architecture
+
+### Escrow Contract Keys and Schemas
+
+| Key | Type | Schema / Meaning |
+|-----|------|------------------|
+| `(ESCROW, u32 order_id)` | Persistent | `Escrow { id, buyer, seller, token, amount, status, release_window, created_at, ipfs_hash, metadata_hash, dispute_reason }` |
+| `DataKey::BuyerEscrows(Address)` | Persistent | `Vec<u64>` of escrow IDs where the address is buyer |
+| `DataKey::SellerEscrows(Address)` | Persistent | `Vec<u64>` of escrow IDs where the address is seller |
+| `DataKey::MinEscrowAmount(Address token)` | Persistent | `i128` minimum allowed escrow amount for token |
+| `PLAT_FEE` | Persistent | `PlatformConfig { platform_fee_bps, platform_wallet, admin, arbitrator }` |
+| `PLAT_WAL` | Persistent | `Address` receiving collected fees |
+| `TOT_FEES` | Persistent | `i128` cumulative fees collected |
+| `ADMIN` | Persistent | `Address` admin account |
+
+Notes:
+- `DataKey::Escrow(u32)` exists in the enum but current runtime writes escrows under tuple key `(ESCROW, order_id)`.
+- `ipfs_hash` and `dispute_reason` are Soroban `String`, not Rust std `String`.
+
+### Onboarding Contract Keys and Schemas
+
+| Key | Type | Schema / Meaning |
+|-----|------|------------------|
+| `DataKey::UserProfile(Address)` | Persistent | `UserProfile { address, role, username, registered_at, is_verified }` |
+| `DataKey::Username(String)` | Persistent | `Address` owner of normalized username |
+| `DataKey::Config` | Persistent | `OnboardingConfig { require_username, min_username_length, max_username_length, platform_admin }` |
+
+---
+
+## Event Reference
+
+### Escrow Events (Indexer-Facing)
+
+Escrow events publish with topics `(event_symbol, order_id)` and typed event bodies:
+
+| Event Symbol | Data Struct |
+|-------------|-------------|
+| `escrow_created` | `EscrowCreatedEvent { escrow_id, buyer, seller, amount, token, release_window, ipfs_hash, metadata_hash }` |
+| `funds_released` | `FundsReleasedEvent { escrow_id, amount }` |
+| `funds_refunded` | `FundsRefundedEvent { escrow_id, amount }` |
+| `escrow_disputed` | `EscrowDisputedEvent { escrow_id, dispute_reason }` |
+| `escrow_resolved` | `EscrowResolvedEvent { escrow_id, resolution }` |
+
+### Onboarding Events
+
+Onboarding events publish with one topic symbol and payload `Address`:
+
+| Event Symbol | Data |
+|-------------|------|
+| `UserOnboarded` | onboarded user address |
+| `RoleUpdated` | updated user address |
+| `UserVerified` | verified user address |
+
+---
+
+## Error Codes
+
+Escrow contract errors (`src/lib.rs`, `Error` enum):
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `1` | `Unauthorized` | Caller does not have required authorization |
+| `2` | `EscrowNotFound` | Escrow ID does not exist |
+| `3` | `InvalidEscrowState` | Escrow state does not allow requested operation |
+| `4` | `UsernameAlreadyExists` | Reserved for username collision handling |
+| `5` | `TokenNotWhitelisted` | Reserved for token-policy validation |
+| `6` | `AmountBelowMinimum` | Amount is non-positive or below configured minimum |
+| `7` | `ReleaseWindowTooLong` | Reserved for release-window policy checks |
+| `8` | `NotInDispute` | Escrow expected to be disputed but was not |
+| `9` | `AlreadyOnboarded` | Reserved for onboarding collision handling |
+| `10` | `InvalidFee` | Platform fee setting is invalid |
+| `11` | `SameBuyerSeller` | Buyer and seller addresses are identical |
+| `12` | `PlatformNotInitialized` | Platform config/admin not initialized |
+| `13` | `ReleaseWindowNotElapsed` | Auto-release attempted before release window end |
+
+Onboarding contract currently reverts with explicit panic messages (for example `Username too short`, `Username already taken`, `User not found`).
+
+---
+
 ## Prerequisites
 
 - Rust 1.70.0 or later
@@ -518,30 +602,33 @@ rustup target add wasm32-unknown-unknown
 
 ## Building Contracts
 
-### Build All Contracts
+### Build and Validate (Recommended)
 
 ```bash
 ./scripts/build.sh
 ```
 
-Or manually:
+This script performs:
+- Optimized release build with `RUSTFLAGS="-C opt-level=z -C lto -C panic=abort"`
+- WASM size validation (`MAX_WASM_SIZE_BYTES`, default `65536`)
+- Automated tests (`cargo test -- --nocapture`)
+
+Configurable environment variables:
+- `WASM_TARGET` (default `wasm32v1-none`)
+- `WASM_ARTIFACT` (default `target/$WASM_TARGET/release/craft_nexus_contract.wasm`)
+- `MAX_WASM_SIZE_BYTES` (default `65536`)
+- `RUN_TESTS` (`1` or `0`)
+- `GENERATE_CONTRACT_ID` (`1` to run `stellar contract id generate`)
+- `STELLAR_NETWORK` (default `futurenet`)
+
+Manual equivalent:
 ```bash
-stellar contract build
+RUSTFLAGS="-C opt-level=z -C lto -C panic=abort" \
+cargo build --target wasm32v1-none --release --locked
 ```
 
-This will create WASM files:
-- **Onboarding**: `target/wasm32-unknown-unknown/release/craft_nexus_onboarding.wasm`
-- **Escrow**: `target/wasm32-unknown-unknown/release/craft_nexus_escrow.wasm`
-
-### Build Specific Contract
-
-```bash
-# Build onboarding contract
-stellar contract build --package onboarding
-
-# Build escrow contract  
-stellar contract build --package escrow
-```
+Primary artifact:
+- `target/wasm32v1-none/release/craft_nexus_contract.wasm`
 
 ---
 
@@ -559,7 +646,7 @@ To deploy contracts, you will need:
 
 ### Automated Deployment (Recommended)
 
-A deployment script is provided in the frontend repository:
+A deployment script is provided in this repository:
 
 ```bash
 ./scripts/deploy.sh [testnet|mainnet] <YOUR_IDENTITY_NAME>
@@ -575,10 +662,10 @@ Example:
 ```
 
 The script will:
-1. Build the contracts
-2. Deploy the WASM files to the specified network
-3. Output the new Contract IDs
-4. Provide the environment variable entries for the frontend
+1. Run `./scripts/build.sh` with optimization, size check, and tests
+2. Configure the selected network if needed
+3. Deploy `craft_nexus_contract.wasm`
+4. Output the deployed contract ID
 
 ### Manual Deployment
 
@@ -594,48 +681,49 @@ stellar network add --rpc-url https://soroban-testnet.stellar.org:443 --network-
 stellar network add --rpc-url https://soroban-rpc.mainnet.stellar.org:443 --network-passphrase "Public Global Stellar Network ; September 2015" mainnet
 ```
 
-#### 2. Deploy Onboarding Contract
+#### 2. Build and verify
 
 ```bash
-# Build
-stellar contract build
+MAX_WASM_SIZE_BYTES=65536 ./scripts/build.sh
+```
 
-# Deploy onboarding contract
+#### 3. Deploy contract
+
+```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/craft_nexus_onboarding.wasm \
+  --wasm target/wasm32v1-none/release/craft_nexus_contract.wasm \
   --source <YOUR_IDENTITY_NAME_OR_SECRET_KEY> \
   --network testnet
 ```
 
-#### 3. Deploy Escrow Contract
+#### 4. Initialize contract
 
-```bash
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/craft_nexus_escrow.wasm \
-  --source <YOUR_IDENTITY_NAME_OR_SECRET_KEY> \
-  --network testnet
-```
-
-#### 4. Initialize Onboarding Contract
-
-After deploying the onboarding contract, initialize it:
+After deployment, initialize platform config:
 
 ```bash
 stellar contract invoke \
-  --id <ONBOARDING_CONTRACT_ID> \
+  --id <ESCROW_CONTRACT_ID> \
   --source <YOUR_IDENTITY_NAME_OR_SECRET_KEY> \
   --network testnet \
   -- \
   initialize \
-  --admin <ADMIN_ADDRESS>
+  --platform_wallet <PLATFORM_WALLET_ADDRESS> \
+  --admin <ADMIN_ADDRESS> \
+  --arbitrator <ARBITRATOR_ADDRESS> \
+  --platform_fee_bps 500
 ```
 
-#### 5. Update Environment Variables
+#### 5. (Optional) Generate deterministic contract ID
 
-After deployment, copy the returned Contract IDs and add to your frontend `.env.local`:
+```bash
+stellar contract id generate --network futurenet
+```
+
+#### 6. Update Environment Variables
+
+After deployment, add the returned contract ID to frontend `.env.local`:
 
 ```
-NEXT_PUBLIC_ONBOARDING_CONTRACT_ADDRESS=<ONBOARDING_CONTRACT_ID>
 NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS=<ESCROW_CONTRACT_ID>
 ```
 
@@ -643,14 +731,20 @@ NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS=<ESCROW_CONTRACT_ID>
 
 ## Testing Contracts
 
-### Run All Tests
+### Full Validation (Build + Size + Tests)
+
+```bash
+./scripts/build.sh
+```
+
+### Run All Unit Tests
 
 ```bash
 cd craft-nexus-contract
-cargo test
+cargo test -- --nocapture
 ```
 
-### Run Specific Contract Tests
+### Run Focused Test Modules
 
 ```bash
 # Test onboarding contract
@@ -669,27 +763,48 @@ See [`craft-nexus/lib/stellar/contracts.ts`](../craft-nexus/lib/stellar/contract
 ### Frontend Integration Example
 
 ```typescript
-// Check if user is onboarded
-const isOnboarded = await onboardingContract.invoke({
-  method: 'is_onboarded',
-  args: [addressToSCVal(walletAddress, 'address')]
-});
-
-// Onboard as artisan
-await onboardingContract.invoke({
-  method: 'onboard_user',
+// Create escrow with optional off-chain metadata
+const created = await escrowContract.invoke({
+  method: "create_escrow_with_metadata",
   args: [
-    addressToSCVal(walletAddress, 'address'),
-    addressToSCVal('artisan_username', 'string'),
-    uint32ToSCVal(2) // UserRole::Artisan
+    addressToSCVal(buyerAddress, "address"),
+    addressToSCVal(sellerAddress, "address"),
+    addressToSCVal(tokenAddress, "address"),
+    i128ToScVal("1000000000"), // 100 USDC in stroops
+    u32ToScVal(42),            // order_id
+    u32ToScVal(604800),        // release_window (7 days)
+    stringToScVal("bafybeigdyrztf2v7..."), // ipfs_hash
+    bytesToScVal(metadataHash32Bytes)
   ]
 });
 
-// Get user role
-const role = await onboardingContract.invoke({
-  method: 'get_user_role', 
-  args: [addressToSCVal(walletAddress, 'address')]
+// Buyer releases funds after delivery confirmation
+await escrowContract.invoke({
+  method: "release_funds",
+  args: [u32ToScVal(42)]
 });
+```
+
+### Event Indexer Example
+
+```typescript
+// Pseudo-code for indexing escrow events.
+// topic[0] is event symbol, topic[1] is order_id for escrow events.
+for (const evt of ledgerEvents) {
+  const eventName = evt.topic[0].toString();
+  const orderId = evt.topic[1]?.toString();
+
+  if (eventName === "escrow_created") {
+    const data = parseEscrowCreatedEvent(evt.value);
+    saveEscrowCreated(orderId, data.buyer, data.seller, data.amount, data.token);
+  } else if (eventName === "escrow_disputed") {
+    const data = parseEscrowDisputedEvent(evt.value);
+    saveEscrowDispute(orderId, data.dispute_reason);
+  } else if (eventName === "escrow_resolved") {
+    const data = parseEscrowResolvedEvent(evt.value);
+    saveEscrowResolution(orderId, data.resolution);
+  }
+}
 ```
 
 ---
@@ -710,10 +825,11 @@ const role = await onboardingContract.invoke({
 
 ## Security Considerations
 
-1. **Admin Key Management**: The platform admin has significant privileges - store the admin key securely
-2. **User Validation**: Always verify user roles before allowing sensitive operations
-3. **Token Handling**: Only use verified token addresses for escrow transactions
-4. **Release Windows**: Choose appropriate release windows balancing buyer protection and seller cash flow
+1. **Admin and Arbitrator Key Management**: `admin` and `arbitrator` can change critical state. Store these keys in HSM or custody infrastructure.
+2. **Strict Auth Expectations**: `buyer.require_auth()`, `admin.require_auth()`, and arbitrator authorization gates are core safety controls. Never bypass these in wrappers.
+3. **Minimum Amount Policy**: Configure `DataKey::MinEscrowAmount(token)` for each accepted token to avoid dust escrow spam.
+4. **Metadata Validation**: `ipfs_hash` is CID-validated and `metadata_hash` must be 32 bytes. Mirror these checks client-side for better UX.
+5. **Size-Gated Builds in CI**: Keep `./scripts/build.sh` in CI to prevent oversized WASM artifacts from shipping.
 
 ---
 
@@ -721,14 +837,20 @@ const role = await onboardingContract.invoke({
 
 ### Common Issues
 
-**"Contract not initialized"**
-- Ensure the onboarding contract has been initialized with `initialize`
+**"PlatformNotInitialized" / "Contract not initialized"**
+- Ensure escrow has been initialized with `initialize(platform_wallet, admin, arbitrator, platform_fee_bps)` before creating escrow.
 
 **"User already onboarded"**
 - Each wallet can only onboard once; use a different wallet address
 
 **"Username too short/long"**
 - Username must be between 3-50 characters
+
+**"AmountBelowMinimum"**
+- Verify amount is positive and above `DataKey::MinEscrowAmount(token)`.
+
+**"ReleaseWindowNotElapsed"**
+- `auto_release` can only execute after `created_at + release_window`.
 
 **"Invalid role"**
 - Only Buyer (1) and Artisan (2) roles can be self-assigned
