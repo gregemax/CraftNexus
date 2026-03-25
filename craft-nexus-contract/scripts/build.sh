@@ -1,31 +1,62 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "🔨 Building CraftNexus Escrow Contract..."
+echo "Building CraftNexus contract with optimized settings..."
 
-# Check if stellar CLI is installed
-STELLAR_BIN=""
-if command -v stellar &> /dev/null; then
-    STELLAR_BIN="stellar"
-elif [ -x "./.local-bin/stellar-cli-bin" ]; then
-    STELLAR_BIN="./.local-bin/stellar-cli-bin"
-else
-    echo "❌ Stellar CLI not found. Please run: ./scripts/install-stellar-cli.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
+
+WASM_TARGET="${WASM_TARGET:-wasm32v1-none}"
+WASM_ARTIFACT="${WASM_ARTIFACT:-target/${WASM_TARGET}/release/craft_nexus_contract.wasm}"
+MAX_WASM_SIZE_BYTES="${MAX_WASM_SIZE_BYTES:-65536}"
+RUN_TESTS="${RUN_TESTS:-1}"
+GENERATE_CONTRACT_ID="${GENERATE_CONTRACT_ID:-0}"
+STELLAR_NETWORK="${STELLAR_NETWORK:-futurenet}"
+BUILD_RUSTFLAGS="${BUILD_RUSTFLAGS:--C opt-level=z -C lto -C panic=abort}"
+
+if ! rustup target list --installed | grep -qx "${WASM_TARGET}"; then
+    echo "Installing missing Rust target: ${WASM_TARGET}"
+    rustup target add "${WASM_TARGET}"
+fi
+
+echo "Running optimized release build..."
+RUSTFLAGS="${BUILD_RUSTFLAGS}" cargo build --target "${WASM_TARGET}" --release --locked
+
+if [ ! -f "${WASM_ARTIFACT}" ]; then
+    echo "Error: build succeeded but artifact is missing: ${WASM_ARTIFACT}"
     exit 1
 fi
 
-# Build the contract
-$STELLAR_BIN contract build
+WASM_SIZE_BYTES="$(wc -c < "${WASM_ARTIFACT}" | tr -d '[:space:]')"
+echo "Built artifact: ${WASM_ARTIFACT}"
+echo "Contract size: ${WASM_SIZE_BYTES} bytes (limit: ${MAX_WASM_SIZE_BYTES} bytes)"
 
-# Check if build was successful
-if [ -f "target/wasm32v1-none/release/craft_nexus_contract.wasm" ]; then
-    echo "✅ Contract built successfully!"
-    echo "📦 WASM file: target/wasm32v1-none/release/craft_nexus_contract.wasm"
-    
-    # Show file size
-    SIZE=$(du -h target/wasm32v1-none/release/craft_nexus_contract.wasm | cut -f1)
-    echo "📊 Size: $SIZE"
-else
-    echo "❌ Build failed. WASM file not found."
+if [ "${WASM_SIZE_BYTES}" -gt "${MAX_WASM_SIZE_BYTES}" ]; then
+    echo "Error: Contract size (${WASM_SIZE_BYTES}) exceeds limit (${MAX_WASM_SIZE_BYTES})"
     exit 1
 fi
+
+if [ "${RUN_TESTS}" = "1" ]; then
+    echo "Running contract tests..."
+    cargo test -- --nocapture
+fi
+
+if [ "${GENERATE_CONTRACT_ID}" = "1" ]; then
+    STELLAR_BIN=""
+    if command -v stellar >/dev/null 2>&1; then
+        STELLAR_BIN="stellar"
+    elif command -v soroban >/dev/null 2>&1; then
+        STELLAR_BIN="soroban"
+    elif [ -x "./.local-bin/stellar-cli-bin" ]; then
+        STELLAR_BIN="./.local-bin/stellar-cli-bin"
+    fi
+
+    if [ -n "${STELLAR_BIN}" ]; then
+        echo "Generating contract ID for network: ${STELLAR_NETWORK}"
+        "${STELLAR_BIN}" contract id generate --network "${STELLAR_NETWORK}"
+    else
+        echo "Skipping contract ID generation: Stellar CLI not found."
+    fi
+fi
+
+echo "Build and validation completed successfully."

@@ -1,8 +1,10 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 NETWORK=${1:-testnet}
 SOURCE_ACCOUNT=${2}
+WASM_TARGET=${WASM_TARGET:-wasm32v1-none}
+WASM_ARTIFACT=${WASM_ARTIFACT:-target/${WASM_TARGET}/release/craft_nexus_contract.wasm}
 
 if [ -z "$SOURCE_ACCOUNT" ]; then
     echo "Usage: ./scripts/deploy.sh [testnet|mainnet] <SOURCE_ACCOUNT>"
@@ -34,7 +36,7 @@ fi
 # Deploy
 echo "📤 Deploying contract..."
 CONTRACT_ID=$(stellar contract deploy \
-    --wasm target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm \
+    --wasm "$WASM_ARTIFACT" \
     --source "$SOURCE_ACCOUNT" \
     --network "$NETWORK")
 
