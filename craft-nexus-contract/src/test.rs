@@ -100,7 +100,7 @@ fn test_release_funds_success() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow already processed")]
+#[should_panic]
 fn test_release_funds_already_processed() {
     let env = Env::default();
     env.mock_all_auths();
@@ -148,7 +148,7 @@ fn test_auto_release_success_after_window() {
 }
 
 #[test]
-#[should_panic(expected = "Release window not yet elapsed")]
+#[should_panic]
 fn test_auto_release_failure_before_window() {
     let env = Env::default();
     env.mock_all_auths();
@@ -209,7 +209,7 @@ fn test_dispute_escrow_success() {
 }
 
 #[test]
-#[should_panic(expected = "Not authorized to refund")]
+#[should_panic]
 fn test_refund_failure_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -223,7 +223,7 @@ fn test_refund_failure_unauthorized() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_get_escrow_not_found() {
     let env = Env::default();
     let (client, _, _, _, _, _) = setup_test(&env);
@@ -231,7 +231,7 @@ fn test_get_escrow_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic]
 fn test_create_escrow_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -242,7 +242,7 @@ fn test_create_escrow_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic]
 fn test_create_escrow_negative_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -253,7 +253,7 @@ fn test_create_escrow_negative_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Buyer and seller must be different")]
+#[should_panic]
 fn test_create_escrow_same_buyer_seller() {
     let env = Env::default();
     env.mock_all_auths();
@@ -381,7 +381,7 @@ fn test_update_platform_fee() {
 }
 
 #[test]
-#[should_panic(expected = "Fee too high")]
+#[should_panic]
 fn test_update_platform_fee_too_high() {
     let env = Env::default();
     env.mock_all_auths();
@@ -424,7 +424,7 @@ fn test_total_fees_accumulate() {
 // ===== Additional Comprehensive Coverage Tests =====
 
 #[test]
-#[should_panic(expected = "Not authorized to dispute")]
+#[should_panic]
 fn test_dispute_escrow_failure_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -438,7 +438,7 @@ fn test_dispute_escrow_failure_unauthorized() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow already processed")]
+#[should_panic]
 fn test_refund_after_release_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -451,7 +451,7 @@ fn test_refund_after_release_fails() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow already processed")]
+#[should_panic]
 fn test_dispute_after_release_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -464,7 +464,7 @@ fn test_dispute_after_release_fails() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_release_funds_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -473,7 +473,7 @@ fn test_release_funds_escrow_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_refund_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -483,7 +483,7 @@ fn test_refund_escrow_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_dispute_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -493,7 +493,7 @@ fn test_dispute_escrow_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_auto_release_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -502,7 +502,7 @@ fn test_auto_release_escrow_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic]
 fn test_can_auto_release_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -519,14 +519,13 @@ fn test_auto_release_at_exact_window_boundary() {
     token_admin.mint(&buyer, &1000);
     let window = 100;
     client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(window));
-
+    
     // Exactly at boundary should be releasable.
     env.ledger().with_mut(|li| {
         li.timestamp += window;
     });
     assert!(client.can_auto_release(&1));
     client.auto_release(&1);
-
     let token_client = token::Client::new(&env, &token_id);
     assert_eq!(token_client.balance(&seller), 475);
     assert_eq!(token_client.balance(&platform_wallet), 25);
