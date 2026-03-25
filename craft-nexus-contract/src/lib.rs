@@ -68,6 +68,14 @@ pub enum EscrowStatus {
     Released = 1,
     Refunded = 2,
     Disputed = 3,
+    Resolved = 4,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Resolution {
+    ReleaseToSeller = 0,
+    RefundToBuyer = 1,
 }
 
 #[contracttype]
@@ -120,6 +128,9 @@ pub struct EscrowDisputedEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowResolvedEvent {
+    pub escrow_id: u64,
+    pub resolution: Resolution,
 pub struct EscrowMetadata {
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
@@ -132,6 +143,7 @@ pub struct PlatformConfig {
     pub platform_fee_bps: u32,      // Platform fee in basis points (500 = 5%)
     pub platform_wallet: Address,    // Wallet address to receive fees
     pub admin: Address,              // Admin address for management
+    pub arbitrator: Address,         // Arbitrator for dispute resolution
 }
 
 #[contract]
@@ -191,10 +203,12 @@ impl EscrowContract {
     /// * `platform_wallet` - Address that will receive platform fees
     /// * `admin` - Admin address for managing platform settings
     /// * `platform_fee_bps` - Platform fee in basis points (default 500 = 5%)
-    pub fn initialize(env: Env, platform_wallet: Address, admin: Address, platform_fee_bps: u32) {
+    pub fn initialize(env: Env, platform_wallet: Address, admin: Address, arbitrator: Address, platform_fee_bps: u32) {
         admin.require_auth();
-        
+
         // Validate fee is within bounds
+        assert!(platform_fee_bps <= MAX_PLATFORM_FEE_BPS, "Fee too high");
+
         if !(platform_fee_bps <= MAX_PLATFORM_FEE_BPS) {
             env.panic_with_error(Error::InvalidFee);
         }
@@ -203,6 +217,7 @@ impl EscrowContract {
             platform_fee_bps,
             platform_wallet: platform_wallet.clone(),
             admin: admin.clone(),
+            arbitrator: arbitrator.clone(),
         };
         
         env.storage().persistent().set(&PLATFORM_FEE, &config);
@@ -371,6 +386,10 @@ impl EscrowContract {
             .get(&PLATFORM_FEE);
         if !(config.is_some()) { env.panic_with_error(Error::PlatformNotInitialized); }
         config.unwrap()
+    }
+
+    fn get_arbitrator(env: &Env) -> Address {
+        Self::get_platform_config(env).arbitrator
     }
 
     /// Calculate platform fee for a given amount
@@ -544,6 +563,31 @@ impl EscrowContract {
         );
     }
 
+    fn release_funds_to_seller(env: &Env, escrow: &Escrow) {
+        let config = Self::get_platform_config(env);
+        let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+        let seller_amount = escrow.amount - fee_amount;
+
+        let token_client = token::Client::new(env, &escrow.token);
+        if fee_amount > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &config.platform_wallet,
+                &fee_amount,
+            );
+            let mut total_fees: i128 = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
+            total_fees += fee_amount;
+            env.storage().persistent().set(&TOTAL_FEES, &total_fees);
+        }
+
+        token_client.transfer(&env.current_contract_address(), &escrow.seller, &seller_amount);
+    }
+
+    fn refund_funds_to_buyer(env: &Env, escrow: &Escrow) {
+        let token_client = token::Client::new(env, &escrow.token);
+        token_client.transfer(&env.current_contract_address(), &escrow.buyer, &escrow.amount);
+    }
+
     /// Get escrow details
     /// 
     /// # Arguments
@@ -624,6 +668,40 @@ impl EscrowContract {
         );
     }
 
+    /// Resolve disputed escrow (arbitrator only)
+    pub fn resolve_dispute(env: Env, order_id: u32, resolution: Resolution) {
+        let arbitrator = Self::get_arbitrator(&env);
+        arbitrator.require_auth();
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&(ESCROW, order_id))
+            .expect("Escrow not found");
+
+        assert!(escrow.status == EscrowStatus::Disputed, "Escrow not in dispute");
+
+        match resolution {
+            Resolution::ReleaseToSeller => {
+                Self::release_funds_to_seller(&env, &escrow);
+            }
+            Resolution::RefundToBuyer => {
+                Self::refund_funds_to_buyer(&env, &escrow);
+            }
+        }
+
+        escrow.status = EscrowStatus::Resolved;
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+
+        env.events().publish(
+            (Symbol::new(&env, "escrow_resolved"), order_id as u64),
+            EscrowResolvedEvent {
+                escrow_id: order_id as u64,
+                resolution,
+            },
+        );
+    }
+
     /// Update platform fee percentage (admin only)
     /// 
     /// # Arguments
@@ -638,6 +716,7 @@ impl EscrowContract {
             platform_fee_bps: new_fee_bps,
             platform_wallet: config.platform_wallet,
             admin: config.admin,
+            arbitrator: config.arbitrator,
         };
         
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
@@ -655,6 +734,7 @@ impl EscrowContract {
             platform_fee_bps: config.platform_fee_bps,
             platform_wallet: new_wallet,
             admin: config.admin,
+            arbitrator: config.arbitrator,
         };
         
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);

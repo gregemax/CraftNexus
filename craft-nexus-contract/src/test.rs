@@ -17,8 +17,10 @@ fn setup_test(env: &Env) -> (EscrowContractClient<'static>, Address, Address, Ad
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
+    let arbitrator = Address::generate(env);
+
     // Initialize contract with platform config
-    client.initialize(&platform_wallet, &admin, &500);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500);
 
     (client, buyer, seller, token_contract.address(), token_admin_client, platform_wallet)
 }
@@ -209,6 +211,67 @@ fn test_dispute_escrow_success() {
 }
 
 #[test]
+fn test_resolve_dispute_release_to_seller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
+    client.dispute_escrow(&1, &buyer);
+
+    // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
+    client.resolve_dispute(&1, &Resolution::ReleaseToSeller);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&seller), 475);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.1, vec![&env, Symbol::new(&env, "escrow_resolved").into_val(&env), 1u64.into_val(&env)]);
+}
+
+#[test]
+fn test_resolve_dispute_refund_to_buyer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
+    client.dispute_escrow(&1, &buyer);
+
+    client.resolve_dispute(&1, &Resolution::RefundToBuyer);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&buyer), 1000);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.1, vec![&env, Symbol::new(&env, "escrow_resolved").into_val(&env), 1u64.into_val(&env)]);
+}
+
+#[test]
+#[should_panic(expected = "Escrow not in dispute")]
+fn test_resolve_dispute_non_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
+
+    client.resolve_dispute(&1, &Resolution::RefundToBuyer);
+}
+
+#[test]
+#[should_panic(expected = "Not authorized to refund")]
 #[should_panic]
 fn test_refund_failure_unauthorized() {
     let env = Env::default();
@@ -298,8 +361,10 @@ fn test_platform_fee_deduction_10_percent() {
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
     
+    let arbitrator = Address::generate(&env);
+
     // Initialize with 10% fee
-    client.initialize(&platform_wallet, &admin, &1000);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000);
     
     token_admin_client.mint(&buyer, &10000);
     client.create_escrow(&buyer, &seller, &token_contract.address(), &1000, &1, &None);
@@ -355,8 +420,10 @@ fn test_update_platform_fee() {
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
     
+    let arbitrator = Address::generate(&env);
+
     // Initialize with 5% fee
-    client.initialize(&platform_wallet, &admin, &500);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500);
     
     // Get initial fee
     assert_eq!(client.get_platform_fee(), 500);
@@ -393,8 +460,10 @@ fn test_update_platform_fee_too_high() {
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     
+    let arbitrator = Address::generate(&env);
+
     // Initialize with 5% fee
-    client.initialize(&platform_wallet, &admin, &500);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500);
     
     // Try to set fee above max (10%)
     client.update_platform_fee(&1500);
@@ -554,8 +623,10 @@ fn test_fee_rounding_custom_bps_025_percent() {
     let platform_wallet = Address::generate(&env);
     let admin = Address::generate(&env);
 
+    let arbitrator = Address::generate(&env);
+
     // 25 bps = 0.25%
-    client.initialize(&platform_wallet, &admin, &25);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &25);
     assert_eq!(client.calculate_fee_for_amount(&1000), 2); // floor(2.5) => 2
     assert_eq!(client.calculate_fee_for_amount(&399), 0); // floor(0.9975) => 0
     assert_eq!(client.calculate_fee_for_amount(&400), 1); // floor(1.0) => 1
@@ -572,8 +643,9 @@ fn test_integration_multiple_tokens_and_escrows() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
 
-    client.initialize(&platform_wallet, &admin, &500);
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500);
 
     // Token A
     let token_a_admin = Address::generate(&env);
