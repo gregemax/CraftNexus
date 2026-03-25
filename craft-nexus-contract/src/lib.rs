@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Symbol,
     token,
 };
 
@@ -393,7 +393,7 @@ impl EscrowContract {
         let current_time = env.ledger().timestamp();
         let elapsed = current_time - (escrow.created_at as u64);
 
-        if !(elapsed >= escrow.release_window) { env.panic_with_error(Error::ReleaseWindowNotElapsed); }
+        if !(elapsed >= escrow.release_window as u64) { env.panic_with_error(Error::ReleaseWindowNotElapsed); }
 
         // Get platform config
         let config = Self::get_platform_config(&env);

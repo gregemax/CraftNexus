@@ -1578,16 +1578,21 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 13
+                }
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Release window not yet elapsed' from contract function 'Symbol(obj#299)'"
+                  "string": "failing with contract error"
                 },
                 {
-                  "u32": 1
+                  "u32": 13
                 }
               ]
             }
@@ -1609,7 +1614,32 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 13
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 13
                 }
               }
             ],
@@ -1634,7 +1664,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 13
                 }
               }
             ],
@@ -1673,7 +1703,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 13
                 }
               }
             ],

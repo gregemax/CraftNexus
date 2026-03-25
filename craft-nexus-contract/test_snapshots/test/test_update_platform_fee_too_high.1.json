@@ -686,16 +686,21 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 10
+                }
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Fee too high' from contract function 'Symbol(obj#113)'"
+                  "string": "failing with contract error"
                 },
                 {
-                  "u32": 1500
+                  "u32": 10
                 }
               ]
             }
@@ -717,7 +722,32 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 10
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 10
                 }
               }
             ],
@@ -742,7 +772,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 10
                 }
               }
             ],
@@ -781,7 +811,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 10
                 }
               }
             ],
