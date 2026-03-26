@@ -305,6 +305,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "is_paused"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "platform_fee_bps"
                       },
                       "val": {
@@ -1871,7 +1879,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#345)'"
+                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#371)'"
                 },
                 {
                   "u32": 1

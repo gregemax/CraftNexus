@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 9,
+    "address": 8,
     "nonce": 0
   },
   "auth": [
@@ -1846,7 +1846,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "dispute_escrow"
+                "symbol": "extend_release_window"
               }
             ],
             "data": {
@@ -1855,10 +1855,7 @@
                   "u32": 1
                 },
                 {
-                  "string": "Invalid reason"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                  "u32": 2160000
                 }
               ]
             }
@@ -1880,7 +1877,7 @@
               },
               {
                 "error": {
-                  "contract": 1
+                  "contract": 7
                 }
               }
             ],
@@ -1890,7 +1887,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 1
+                  "u32": 7
                 }
               ]
             }
@@ -1912,7 +1909,7 @@
               },
               {
                 "error": {
-                  "contract": 1
+                  "contract": 7
                 }
               }
             ],
@@ -1937,7 +1934,7 @@
               },
               {
                 "error": {
-                  "contract": 1
+                  "contract": 7
                 }
               }
             ],
@@ -1962,7 +1959,7 @@
               },
               {
                 "error": {
-                  "contract": 1
+                  "contract": 7
                 }
               }
             ],
@@ -1972,7 +1969,7 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "dispute_escrow"
+                  "symbol": "extend_release_window"
                 },
                 {
                   "vec": [
@@ -1980,10 +1977,7 @@
                       "u32": 1
                     },
                     {
-                      "string": "Invalid reason"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                      "u32": 2160000
                     }
                   ]
                 }
@@ -2007,7 +2001,7 @@
               },
               {
                 "error": {
-                  "contract": 1
+                  "contract": 7
                 }
               }
             ],

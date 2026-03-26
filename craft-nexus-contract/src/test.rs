@@ -237,7 +237,7 @@ fn test_auto_release_failure_before_window() {
 fn test_refund_success_by_admin() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, _, _admin) = setup_test(&env, false);
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
@@ -701,7 +701,7 @@ fn test_dispute_escrow_failure_unauthorized() {
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
-    let unauthorized = Address::generate(&env);
+    let _unauthorized = Address::generate(&env);
     let unauthorized = Address::generate(&env);
     client.dispute_escrow(&1, &String::from_str(&env, "Unauthorized"), &unauthorized);
 }
@@ -1382,4 +1382,138 @@ fn test_release_batch_funds_fails_unauthorized() {
     let unauthorized = Address::generate(&env);
     let order_ids = vec![&env, 100u32];
     client.release_batch_funds(&1u64, &order_ids, &unauthorized);
+}
+
+#[test]
+fn test_reentrancy_guard_prevents_recursive_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    // Manually set the guard in temporary storage
+    env.as_contract(&client.address, || {
+        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
+    });
+
+    // Attempting to call a guarded function should now fail
+    let result = client.try_release_funds(&1);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_reentrancy_guard_cleared_after_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    // This should succeed and clear the guard
+    client.release_funds(&1);
+
+    // The guard should be gone
+    env.as_contract(&client.address, || {
+        assert!(!env.storage().temporary().has(&DataKey::ReentryGuard));
+    });
+}
+
+#[test]
+fn test_extend_release_window_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    let window = 3600;
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
+
+    let additional = 7200;
+    client.extend_release_window(&1, &additional);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.release_window, window + additional);
+
+    // Verify event
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "escrow_extended").into_val(&env),
+            1u64.into_val(&env)
+        ]
+    );
+
+    let event: EscrowExtendedEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(event.escrow_id, 1);
+    assert_eq!(event.buyer, buyer);
+    assert_eq!(event.seller, seller);
+    assert_eq!(event.new_release_window, window + additional);
+    assert_eq!(event.additional_seconds, additional);
+}
+
+#[test]
+#[should_panic]
+fn test_extend_release_window_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    // Switch auth to seller
+    env.set_auths(&[]); // Clear auths
+    client.extend_release_window(&1, &3600);
+}
+
+#[test]
+#[should_panic]
+fn test_extend_release_window_too_long() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    // Max is 30 days (2592000). Default is 7 days (604800).
+    // Try adding 25 days (2160000) -> 604800 + 2160000 = 2764800 > 2592000
+    client.extend_release_window(&1, &2160000);
+}
+
+#[test]
+fn test_auto_release_respects_extension() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    let window = 100;
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
+
+    client.extend_release_window(&1, &100);
+
+    // Advance time by 150 - should still fail auto_release (window is now 200)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 150;
+    });
+
+    assert!(!client.can_auto_release(&1));
+    let result = client.try_auto_release(&1);
+    assert!(result.is_err());
+
+    // Advance time by another 100 (total 250) - should now succeed
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100;
+    });
+
+    assert!(client.can_auto_release(&1));
+    client.auto_release(&1);
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Released);
 }
