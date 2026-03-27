@@ -84,6 +84,8 @@ const STAKE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
 const CURRENT_ESCROW_VERSION: u32 = 2;
+/// Maximum number of escrows per batch operation (Issue #111)
+const MAX_BATCH_SIZE: u32 = 100;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -282,6 +284,16 @@ pub struct BatchFundsReleasedEvent {
 pub struct EscrowMetadata {
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
+}
+
+/// Metadata reveal proof for privacy verification (Issue #122)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataRevealProof {
+    /// The full metadata content (off-chain document)
+    pub content: Bytes,
+    /// Optional secret key for additional verification
+    pub secret: Option<Bytes>,
 }
 
 #[contracttype]
@@ -1375,6 +1387,43 @@ impl EscrowContract {
         }
     }
 
+    /// Verify that provided metadata matches the stored hash (Issue #122)
+    ///
+    /// This function allows parties to reveal off-chain metadata and verify it matches
+    /// the commitment stored on-chain. Uses SHA-256 hashing for verification.
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    /// * `proof` - MetadataRevealProof containing the full content and optional secret
+    ///
+    /// # Returns
+    /// true if the provided content hashes to the stored metadata_hash, false otherwise
+    ///
+    /// # Notes
+    /// - The metadata_hash must be set on the escrow for verification to succeed
+    /// - The secret field is optional and can be used for additional application-level verification
+    /// - This function does NOT modify state; it only verifies the commitment
+    pub fn verify_metadata_reveal(env: Env, order_id: u32, proof: MetadataRevealProof) -> bool {
+        let escrow = Self::get_escrow(env.clone(), order_id);
+
+        // If no metadata hash was set, verification fails
+        if escrow.metadata_hash.is_none() {
+            return false;
+        }
+
+        let stored_hash = escrow.metadata_hash.unwrap();
+
+        // Compute SHA-256 hash of the provided content
+        let computed_hash = env.crypto().sha256(&proof.content);
+
+        // Convert Hash to Bytes by creating a new Bytes from the hash
+        // Hash implements Into<Bytes> in Soroban SDK
+        let computed_bytes: Bytes = computed_hash.into();
+
+        // Compare hashes
+        computed_bytes == stored_hash
+    }
+
     /// Check if escrow can be auto-released
     ///
     /// # Arguments
@@ -1698,6 +1747,8 @@ impl EscrowContract {
     }
 
     /// Create a single escrow from parameters (internal helper)
+    /// Note: For batch operations, buyer/seller escrow list updates are consolidated
+    /// by the caller to minimize storage writes (Issue #111)
     fn create_single_escrow(env: &Env, params: EscrowCreateParams) -> Result<u64, Error> {
         // Validate first
         Self::validate_escrow_params(env, &params)?;
@@ -1736,28 +1787,6 @@ impl EscrowContract {
             .set(&(ESCROW, params.order_id), &escrow);
         Self::extend_persistent(env, &(ESCROW, params.order_id));
 
-        // Update buyer's escrow list for indexing
-        let buyer_key = DataKey::BuyerEscrows(params.buyer.clone());
-        let mut buyer_escrows: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&buyer_key)
-            .unwrap_or(soroban_sdk::Vec::new(env));
-        buyer_escrows.push_back(params.order_id as u64);
-        env.storage().persistent().set(&buyer_key, &buyer_escrows);
-        Self::extend_persistent(env, &buyer_key);
-
-        // Update seller's escrow list for indexing
-        let seller_key = DataKey::SellerEscrows(params.seller.clone());
-        let mut seller_escrows: soroban_sdk::Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&seller_key)
-            .unwrap_or(soroban_sdk::Vec::new(env));
-        seller_escrows.push_back(params.order_id as u64);
-        env.storage().persistent().set(&seller_key, &seller_escrows);
-        Self::extend_persistent(env, &seller_key);
-
         // Transfer funds from buyer to contract
         let client = token::Client::new(env, &params.token);
         client.transfer(
@@ -1783,51 +1812,95 @@ impl EscrowContract {
         Ok(params.order_id as u64)
     }
 
-    /// Create multiple escrows in a batch operation
+    /// Create multiple escrows in a batch operation (Issue #111: Optimized)
     ///
     /// Validates all escrows first before processing any to ensure atomic behavior.
+    /// Optimizations:
+    /// - Single authorization check for batch caller
+    /// - Consolidated storage updates for buyer/seller escrow lists
+    /// - Batch size limit to prevent resource exhaustion
     ///
     /// # Arguments
-    /// * `escrows` - Vector of escrow creation parameters
+    /// * `escrows` - Vector of escrow creation parameters (max MAX_BATCH_SIZE items)
     /// * `batch_id` - Unique identifier for this batch operation
+    ///
+    /// # Returns
+    /// Vector of created escrow IDs
+    ///
+    /// # Errors
+    /// - BatchOperationFailed if batch exceeds MAX_BATCH_SIZE
+    /// - Any validation error from individual escrows
     pub fn create_batch_escrow(
         env: Env,
         batch_id: u64,
         escrows: soroban_sdk::Vec<EscrowCreateParams>,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
         Self::enter_reentry_guard(&env);
+        Self::check_not_paused(&env);
+
+        // Issue #111: Enforce batch size limit
+        if escrows.len() > MAX_BATCH_SIZE as u32 {
+            return Err(Error::BatchOperationFailed);
+        }
+
         let mut results = soroban_sdk::Vec::new(&env);
 
-        // Collect all params first for validation
-        let mut params_list: soroban_sdk::Vec<EscrowCreateParams> = soroban_sdk::Vec::new(&env);
+        // Early exit for empty batch
+        if escrows.len() == 0 {
+            Self::exit_reentry_guard(&env);
+            return Ok(results);
+        }
+
+        // Issue #111: Single authorization check - require auth from first buyer only
+        let first_params = escrows.get(0).expect("Batch is empty");
+        first_params.buyer.require_auth();
+
+        // Issue #111: Validate all first (single pass)
         for i in 0..escrows.len() {
             if let Some(params) = escrows.get(i) {
-                params_list.push_back(params);
-            }
-        }
-
-        // Validate all first
-        for i in 0..params_list.len() {
-            if let Some(params) = params_list.get(i) {
                 Self::validate_escrow_params(&env, &params)?;
             }
         }
 
-        // Then create all - buyer must authorize for each
-        // Since the batch needs buyer auth, we require the first buyer to authorize
-        // and use their auth for all escrows (in practice, each escrow would have its own auth)
-        for i in 0..params_list.len() {
-            if let Some(params) = params_list.get(i) {
-                // Require auth from the buyer of the first escrow
-                if i == 0 {
-                    params.buyer.require_auth();
-                }
+        // Issue #111: Collect buyer/seller updates to consolidate storage writes
+        let mut buyer_updates: Map<Address, soroban_sdk::Vec<u64>> = Map::new(&env);
+        let mut seller_updates: Map<Address, soroban_sdk::Vec<u64>> = Map::new(&env);
 
-                // Validate again to ensure still valid
-                Self::validate_escrow_params(&env, &params)?;
-
-                match Self::create_single_escrow(&env, params) {
+        // Create all escrows
+        for i in 0..escrows.len() {
+            if let Some(params) = escrows.get(i) {
+                match Self::create_single_escrow(&env, params.clone()) {
                     Ok(id) => {
+                        // Collect updates for consolidation
+                        let buyer_key = params.buyer.clone();
+                        let seller_key = params.seller.clone();
+
+                        // Track buyer updates
+                        if !buyer_updates.contains_key(buyer_key.clone()) {
+                            let existing: soroban_sdk::Vec<u64> = env
+                                .storage()
+                                .persistent()
+                                .get(&DataKey::BuyerEscrows(buyer_key.clone()))
+                                .unwrap_or(soroban_sdk::Vec::new(&env));
+                            buyer_updates.set(buyer_key.clone(), existing);
+                        }
+                        let mut buyer_list = buyer_updates.get(buyer_key.clone()).unwrap();
+                        buyer_list.push_back(id);
+                        buyer_updates.set(buyer_key, buyer_list);
+
+                        // Track seller updates
+                        if !seller_updates.contains_key(seller_key.clone()) {
+                            let existing: soroban_sdk::Vec<u64> = env
+                                .storage()
+                                .persistent()
+                                .get(&DataKey::SellerEscrows(seller_key.clone()))
+                                .unwrap_or(soroban_sdk::Vec::new(&env));
+                            seller_updates.set(seller_key.clone(), existing);
+                        }
+                        let mut seller_list = seller_updates.get(seller_key.clone()).unwrap();
+                        seller_list.push_back(id);
+                        seller_updates.set(seller_key, seller_list);
+
                         // Emit batch event
                         let escrow_opt: Option<Escrow> =
                             env.storage().persistent().get(&(ESCROW, id as u32));
@@ -1848,12 +1921,47 @@ impl EscrowContract {
                         results.push_back(id);
                     }
                     Err(e) => {
+                        Self::exit_reentry_guard(&env);
                         return Err(e);
                     }
                 }
             }
         }
 
+        // Issue #111: Consolidate all storage updates at once
+        let mut i = 0;
+        loop {
+            if i >= buyer_updates.len() {
+                break;
+            }
+            if let Some(buyer_addr) = buyer_updates.keys().get(i) {
+                if let Some(buyer_list) = buyer_updates.get(buyer_addr.clone()) {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::BuyerEscrows(buyer_addr.clone()), &buyer_list);
+                    Self::extend_persistent(&env, &DataKey::BuyerEscrows(buyer_addr));
+                }
+            }
+            i += 1;
+        }
+
+        let mut i = 0;
+        loop {
+            if i >= seller_updates.len() {
+                break;
+            }
+            if let Some(seller_addr) = seller_updates.keys().get(i) {
+                if let Some(seller_list) = seller_updates.get(seller_addr.clone()) {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::SellerEscrows(seller_addr.clone()), &seller_list);
+                    Self::extend_persistent(&env, &DataKey::SellerEscrows(seller_addr));
+                }
+            }
+            i += 1;
+        }
+
+        Self::exit_reentry_guard(&env);
         Ok(results)
     }
 

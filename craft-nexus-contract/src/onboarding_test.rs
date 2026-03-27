@@ -782,3 +782,198 @@ fn test_get_user_migrates_legacy_profile() {
     });
     assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
 }
+
+// ============================================================
+// Issue #114 – Username Change Mechanism Tests
+// ============================================================
+
+#[test]
+fn test_change_username_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let original_username = String::from_str(&env, "original_user");
+
+    // Onboard user
+    client.onboard_user(&user, &original_username, &UserRole::Buyer);
+
+    // Change username
+    let new_username = String::from_str(&env, "new_user");
+    let updated_profile = client.change_username(&user, &new_username);
+
+    assert_eq!(updated_profile.username, String::from_str(&env, "new_user"));
+    assert_eq!(updated_profile.address, user);
+
+    // Verify old username is no longer taken
+    assert!(!client.is_username_taken(&original_username));
+
+    // Verify new username is taken
+    assert!(client.is_username_taken(&new_username));
+
+    // Verify can retrieve user by new username
+    let retrieved = client.get_user_by_username(&new_username);
+    assert_eq!(retrieved.address, user);
+}
+
+#[test]
+fn test_change_username_case_insensitive() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer);
+
+    // Change to different case
+    let new_username = String::from_str(&env, "NewUser");
+    let updated = client.change_username(&user, &new_username);
+
+    // Should be normalized to lowercase
+    assert_eq!(updated.username, String::from_str(&env, "newuser"));
+}
+
+#[test]
+#[should_panic(expected = "Username already taken")]
+fn test_change_username_to_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.onboard_user(&user1, &String::from_str(&env, "user1"), &UserRole::Buyer);
+    client.onboard_user(&user2, &String::from_str(&env, "user2"), &UserRole::Buyer);
+
+    // Try to change user2's username to user1's username
+    client.change_username(&user2, &String::from_str(&env, "user1"));
+}
+
+#[test]
+#[should_panic(expected = "Username too short")]
+fn test_change_username_too_short() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "original_user"),
+        &UserRole::Buyer,
+    );
+
+    // Try to change to a username that's too short
+    client.change_username(&user, &String::from_str(&env, "ab"));
+}
+
+#[test]
+#[should_panic(expected = "Username too long")]
+fn test_change_username_too_long() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "original_user"),
+        &UserRole::Buyer,
+    );
+
+    // Try to change to a username that's too long (> 50 chars)
+    let long_username = String::from_str(
+        &env,
+        "this_is_a_very_long_username_that_exceeds_the_maximum_allowed_length_for_usernames",
+    );
+    client.change_username(&user, &long_username);
+}
+
+#[test]
+#[should_panic(expected = "User not onboarded")]
+fn test_change_username_not_onboarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    // Try to change username for non-existent user
+    client.change_username(&user, &String::from_str(&env, "new_username"));
+}
+
+#[test]
+fn test_username_change_fee_management() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+
+    // Set username change fee
+    client.set_username_change_fee(&1_000_000);
+
+    let fee = client.get_username_change_fee();
+    assert_eq!(fee, 1_000_000);
+
+    // Update fee
+    client.set_username_change_fee(&2_000_000);
+    let new_fee = client.get_username_change_fee();
+    assert_eq!(new_fee, 2_000_000);
+
+    // Disable fee
+    client.set_username_change_fee(&0);
+    let disabled_fee = client.get_username_change_fee();
+    assert_eq!(disabled_fee, 0);
+}
+
+#[test]
+fn test_change_username_with_special_characters() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer);
+
+    // Change to username with special characters (should be normalized)
+    let new_username = String::from_str(&env, "New-User_Name.123");
+    let updated = client.change_username(&user, &new_username);
+
+    // Should be normalized with underscores
+    assert_eq!(
+        updated.username,
+        String::from_str(&env, "new_user_name_123")
+    );
+}
+
+#[test]
+fn test_change_username_preserves_other_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    let original = client.onboard_user(
+        &user,
+        &String::from_str(&env, "original"),
+        &UserRole::Artisan,
+    );
+    assert_eq!(original.role, UserRole::Artisan);
+    assert_eq!(original.is_verified, false);
+
+    // Change username
+    let updated = client.change_username(&user, &String::from_str(&env, "new_name"));
+
+    // Verify other fields are preserved
+    assert_eq!(updated.role, UserRole::Artisan);
+    assert_eq!(updated.is_verified, false);
+    assert_eq!(updated.address, user);
+    assert_eq!(updated.registered_at, original.registered_at);
+}

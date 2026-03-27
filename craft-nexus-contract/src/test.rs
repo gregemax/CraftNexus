@@ -1849,3 +1849,265 @@ fn test_refund_no_onboarding_contract() {
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
 }
+
+// ============================================================
+// Issue #111 – Batch Optimization Tests (Additional)
+// ============================================================
+
+/// Test batch creation consolidates storage updates (Issue #111)
+#[test]
+fn test_create_batch_escrow_consolidates_storage() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &500_000);
+
+    let mut batch_params = vec![&env];
+    for i in 0..10 {
+        batch_params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 5_000,
+            order_id: 300 + i,
+            release_window: Some(3600),
+            ipfs_hash: None,
+            metadata_hash: None,
+        });
+    }
+
+    let results = client.create_batch_escrow(&2u64, &batch_params);
+    assert_eq!(results.len(), 10);
+
+    // Verify buyer's escrow list contains all 10
+    let buyer_escrows = client.get_escrows_by_buyer(&buyer, &0, &100);
+    assert_eq!(buyer_escrows.len(), 10);
+
+    // Verify seller's escrow list contains all 10
+    let seller_escrows = client.get_escrows_by_seller(&seller, &0, &100);
+    assert_eq!(seller_escrows.len(), 10);
+}
+
+// ============================================================
+// Issue #122 – Metadata Privacy Tests
+// ============================================================
+
+/// Test metadata reveal verification with valid content (Issue #122)
+#[test]
+fn test_verify_metadata_reveal_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Create content and compute its hash
+    let content = Bytes::from_slice(&env, b"test metadata content");
+    let content_hash = env.crypto().sha256(&content);
+    let content_hash_bytes: Bytes = content_hash.into();
+
+    let escrow = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &1,
+        &Some(3600),
+        &None,
+        &Some(content_hash_bytes.clone()),
+    );
+
+    assert_eq!(escrow.metadata_hash, Some(content_hash_bytes));
+
+    // Verify the metadata reveal
+    let proof = MetadataRevealProof {
+        content: content.clone(),
+        secret: None,
+    };
+
+    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    assert!(is_valid);
+}
+
+/// Test metadata reveal verification with invalid content (Issue #122)
+#[test]
+fn test_verify_metadata_reveal_invalid_content() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    let content = Bytes::from_slice(&env, b"test metadata content");
+    let content_hash = env.crypto().sha256(&content);
+    let content_hash_bytes: Bytes = content_hash.into();
+
+    client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &1,
+        &Some(3600),
+        &None,
+        &Some(content_hash_bytes),
+    );
+
+    // Try to verify with different content
+    let wrong_content = Bytes::from_slice(&env, b"wrong content");
+    let proof = MetadataRevealProof {
+        content: wrong_content,
+        secret: None,
+    };
+
+    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    assert!(!is_valid);
+}
+
+/// Test metadata reveal verification without metadata hash (Issue #122)
+#[test]
+fn test_verify_metadata_reveal_no_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Create escrow without metadata hash
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
+
+    let content = Bytes::from_slice(&env, b"test metadata content");
+    let proof = MetadataRevealProof {
+        content,
+        secret: None,
+    };
+
+    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    assert!(!is_valid);
+}
+
+/// Test get_escrow_metadata returns only metadata fields (Issue #122)
+#[test]
+fn test_get_escrow_metadata_privacy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    let content = Bytes::from_slice(&env, b"private metadata");
+    let content_hash = env.crypto().sha256(&content);
+    let content_hash_bytes: Bytes = content_hash.into();
+
+    client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &1,
+        &Some(3600),
+        &None,
+        &Some(content_hash_bytes.clone()),
+    );
+
+    let metadata = client.get_escrow_metadata(&1);
+    assert_eq!(metadata.metadata_hash, Some(content_hash_bytes));
+    assert_eq!(metadata.ipfs_hash, None);
+}
+
+// ============================================================
+// Issue #121 – Comprehensive Test Suite
+// ============================================================
+
+/// Test escrow with IPFS hash validation (Issue #121)
+#[test]
+fn test_create_escrow_with_ipfs_hash_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Valid CIDv0 (46 chars starting with Qm)
+    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
+
+    let escrow = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &1,
+        &Some(3600),
+        &Some(ipfs_hash.clone()),
+        &None,
+    );
+
+    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash));
+}
+
+/// Test escrow creation with both IPFS and metadata hash (Issue #121)
+#[test]
+fn test_create_escrow_with_both_metadata_types() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
+    let content = Bytes::from_slice(&env, b"metadata");
+    let metadata_hash = env.crypto().sha256(&content);
+    let metadata_hash_bytes: Bytes = metadata_hash.into();
+
+    let escrow = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &1,
+        &Some(3600),
+        &Some(ipfs_hash.clone()),
+        &Some(metadata_hash_bytes.clone()),
+    );
+
+    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash));
+    assert_eq!(escrow.metadata_hash, Some(metadata_hash_bytes));
+}
+
+/// Test batch creation with metadata (Issue #121)
+#[test]
+fn test_create_batch_escrow_with_metadata() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &500_000);
+
+    let content = Bytes::from_slice(&env, b"batch metadata");
+    let metadata_hash = env.crypto().sha256(&content);
+    let metadata_hash_bytes: Bytes = metadata_hash.into();
+
+    let mut batch_params = vec![&env];
+    for i in 0..3 {
+        batch_params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 10_000,
+            order_id: 500 + i,
+            release_window: Some(3600),
+            ipfs_hash: None,
+            metadata_hash: Some(metadata_hash_bytes.clone()),
+        });
+    }
+
+    let results = client.create_batch_escrow(&3u64, &batch_params);
+    assert_eq!(results.len(), 3);
+
+    // Verify metadata was stored
+    for i in 0..3 {
+        let metadata = client.get_escrow_metadata(&(500 + i));
+        assert_eq!(metadata.metadata_hash, Some(metadata_hash_bytes.clone()));
+    }
+}

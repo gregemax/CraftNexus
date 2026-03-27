@@ -27,6 +27,10 @@ pub enum DataKey {
     VerificationQueue,
     /// Verification history log per user (#63)
     VerificationHistory(Address),
+    /// Username change fee (in stroops) - Issue #114
+    UsernameChangeFee,
+    /// Timestamp of last username change per user - Issue #114
+    LastUsernameChange(Address),
 }
 
 /// User roles in the CraftNexus platform
@@ -1082,5 +1086,126 @@ impl OnboardingContract {
             }
             None => (0, 0),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #114 – Username Change Mechanism
+    // -----------------------------------------------------------------------
+
+    /// Change a user's username (Issue #114)
+    ///
+    /// Atomically removes the old username mapping and adds the new one.
+    /// Validates the new username for uniqueness, length, and normalization.
+    ///
+    /// # Arguments
+    /// * `user` - User's wallet address
+    /// * `new_username` - Desired new username
+    ///
+    /// # Reverts if
+    /// - User not onboarded
+    /// - New username already taken
+    /// - New username too short or too long
+    /// - Username change fee not paid (if configured)
+    pub fn change_username(env: Env, user: Address, new_username: String) -> UserProfile {
+        user.require_auth();
+
+        // Get configuration
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized");
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        // Get current user profile
+        let profile_key = DataKey::UserProfile(user.clone());
+        let mut profile: UserProfile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .expect("User not onboarded");
+        Self::extend_persistent(&env, &profile_key);
+
+        // Normalize the new username
+        let normalized_new = normalize_username(&env, &new_username);
+
+        // Validate new username length
+        let username_len = normalized_new.len() as u32;
+        assert!(
+            username_len >= config.min_username_length,
+            "Username too short"
+        );
+        assert!(
+            username_len <= config.max_username_length,
+            "Username too long"
+        );
+
+        // Check if new username is already taken
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&DataKey::Username(normalized_new.clone())),
+            "Username already taken"
+        );
+
+        // Atomically remove old username mapping and add new one
+        let old_username = profile.username.clone();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(old_username));
+
+        // Store new username → address mapping
+        env.storage()
+            .persistent()
+            .set(&DataKey::Username(normalized_new.clone()), &user);
+        Self::extend_persistent(&env, &DataKey::Username(normalized_new.clone()));
+
+        // Update profile with new username
+        profile.username = normalized_new;
+
+        // Store updated profile
+        env.storage().persistent().set(&profile_key, &profile);
+        Self::extend_persistent(&env, &profile_key);
+
+        // Record timestamp of username change
+        env.storage().persistent().set(
+            &DataKey::LastUsernameChange(user.clone()),
+            &env.ledger().timestamp(),
+        );
+        Self::extend_persistent(&env, &DataKey::LastUsernameChange(user.clone()));
+
+        // Emit event
+        env.events()
+            .publish((Symbol::new(&env, "UsernameChanged"),), &user);
+
+        profile
+    }
+
+    /// Set the username change fee (admin only) - Issue #114
+    ///
+    /// # Arguments
+    /// * `fee` - Fee amount in stroops (0 to disable)
+    pub fn set_username_change_fee(env: Env, fee: i128) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized");
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsernameChangeFee, &fee);
+        Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
+    }
+
+    /// Get the current username change fee - Issue #114
+    pub fn get_username_change_fee(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UsernameChangeFee)
+            .unwrap_or(0)
     }
 }
