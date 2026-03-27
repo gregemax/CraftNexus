@@ -1586,3 +1586,141 @@ fn test_auto_release_respects_extension() {
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Released);
 }
+
+// ============================================================
+// Issue #67 – Custom Release Window Constraints
+// ============================================================
+
+/// Default max window (MAX_TOTAL_RELEASE_WINDOW = 2_592_000) is applied when
+/// no admin has called set_max_release_window. An escrow with a window below
+/// the default must be created successfully.
+#[test]
+fn test_max_window_default_allows_normal_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // 7-day window (604800) is well below the 30-day default max (2_592_000)
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(604800));
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.release_window, 604800);
+}
+
+/// A zero release window must be rejected.
+#[test]
+#[should_panic]
+fn test_create_escrow_zero_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // window = 0 should panic with ReleaseWindowTooShort
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(0));
+}
+
+/// A window that exceeds the default maximum (2_592_000 seconds) must be rejected.
+#[test]
+#[should_panic]
+fn test_create_escrow_exceeds_default_max_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // 31 days in seconds > 30-day default max
+    let too_long: u32 = 31 * 24 * 60 * 60;
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(too_long));
+}
+
+/// Admin can tighten the maximum; subsequent escrows over the new limit fail.
+#[test]
+fn test_set_max_release_window_and_enforcement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Set a tight maximum of 1 hour (3600 seconds)
+    client.set_max_release_window(&3600u32);
+
+    // Escrow with window exactly at the limit succeeds
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(3600));
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.release_window, 3600);
+}
+
+/// A window that exceeds the admin-configured maximum must be rejected.
+#[test]
+#[should_panic]
+fn test_create_escrow_exceeds_configured_max_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Admin sets a 1-hour max
+    client.set_max_release_window(&3600u32);
+
+    // Attempting 2 hours should panic with ReleaseWindowTooLong
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(7200));
+}
+
+/// set_max_release_window with zero must be rejected.
+#[test]
+#[should_panic]
+fn test_set_max_release_window_zero_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    client.set_max_release_window(&0u32);
+}
+
+// ============================================================
+// Issue #100 – Reputation System / cross-contract plumbing
+// ============================================================
+
+/// set_onboarding_contract stores the address without error.
+#[test]
+fn test_set_onboarding_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let fake_onboarding = Address::generate(&env);
+    // Should not panic
+    client.set_onboarding_contract(&fake_onboarding);
+}
+
+/// When no onboarding contract is set, release_funds completes without error.
+#[test]
+fn test_release_funds_no_onboarding_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    client.release_funds(&1); // should succeed gracefully
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}
+
+/// When no onboarding contract is set, refund completes without error.
+#[test]
+fn test_refund_no_onboarding_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    let result = client.try_refund(&1u64);
+    assert!(result.is_ok());
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Refunded);
+}

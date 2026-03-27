@@ -94,6 +94,12 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "escrow_contract"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "max_username_length"
                       },
                       "val": {
@@ -102,10 +108,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "min_escrow_count_for_verify"
+                      },
+                      "val": {
+                        "u32": 5
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "min_username_length"
                       },
                       "val": {
                         "u32": 3
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "min_volume_for_verify"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 10000000000
+                        }
                       }
                     },
                     {
@@ -180,6 +205,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "disputed_trades"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "is_verified"
                       },
                       "val": {
@@ -200,6 +233,14 @@
                       },
                       "val": {
                         "u32": 3
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "successful_trades"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
@@ -266,6 +307,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "disputed_trades"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "is_verified"
                       },
                       "val": {
@@ -286,6 +335,14 @@
                       },
                       "val": {
                         "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "successful_trades"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
@@ -562,6 +619,12 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "escrow_contract"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "max_username_length"
                   },
                   "val": {
@@ -570,10 +633,29 @@
                 },
                 {
                   "key": {
+                    "symbol": "min_escrow_count_for_verify"
+                  },
+                  "val": {
+                    "u32": 5
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "min_username_length"
                   },
                   "val": {
                     "u32": 3
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "min_volume_for_verify"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 10000000000
+                    }
                   }
                 },
                 {
@@ -731,6 +813,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "disputed_trades"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "is_verified"
                   },
                   "val": {
@@ -751,6 +841,14 @@
                   },
                   "val": {
                     "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "successful_trades"
+                  },
+                  "val": {
+                    "u32": 0
                   }
                 },
                 {

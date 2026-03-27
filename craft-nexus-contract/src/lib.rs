@@ -58,6 +58,8 @@ pub enum Error {
     ProposalAlreadyExists = 21,
     /// Re-entrancy detected
     ReentryDetected = 22,
+    /// Release window is zero or negative
+    ReleaseWindowTooShort = 23,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
@@ -110,6 +112,10 @@ pub enum DataKey {
     PendingAdmin,
     /// Proposal for contract WASM upgrade
     WasmUpgradeProposal,
+    /// Configurable maximum release window (in seconds)
+    MaxReleaseWindow,
+    /// Address of the deployed onboarding contract for cross-contract reputation calls
+    OnboardingContractAddress,
 }
 
 #[contracttype]
@@ -303,6 +309,25 @@ pub struct PartialRefundProposal {
 }
 
 
+/// Minimal cross-contract interface for the OnboardingContract.
+/// Used by EscrowContract to update user reputation and activity metrics
+/// when escrow state changes (release, refund, resolve).
+#[soroban_sdk::contractclient(name = "OnboardingClient")]
+pub trait OnboardingInterface {
+    fn update_reputation(
+        env: Env,
+        address: Address,
+        successful_delta: u32,
+        disputed_delta: u32,
+    );
+    fn update_user_metrics(
+        env: Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+    );
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -385,7 +410,7 @@ impl EscrowContract {
     }
 
     fn validate_optional_metadata_hash(_metadata_hash: &Option<Bytes>) {
-        // BytesN<32> is always exactly 32 bytes by type; no runtime check needed
+        // Bytes length is not constrained by type; callers are responsible for content
     }
 
     fn get_admin(env: &Env) -> Result<Address, Error> {
@@ -481,6 +506,51 @@ impl EscrowContract {
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
     }
 
+    /// Returns the configured maximum release window (in seconds).
+    /// Falls back to MAX_TOTAL_RELEASE_WINDOW (30 days) if not set by admin.
+    fn get_max_release_window(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MaxReleaseWindow)
+            .unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
+    }
+
+    /// Returns an OnboardingClient pointed at the registered onboarding contract,
+    /// or None if no address has been configured via set_onboarding_contract.
+    fn get_onboarding_client(env: &Env) -> Option<OnboardingClient> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::OnboardingContractAddress)
+            .map(|addr| OnboardingClient::new(env, &addr))
+    }
+
+    /// Set the configurable maximum release window (admin only).
+    ///
+    /// # Arguments
+    /// * `max_window` - Maximum allowed release window in seconds (must be > 0)
+    pub fn set_max_release_window(env: Env, max_window: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        if max_window == 0 {
+            env.panic_with_error(Error::ReleaseWindowTooShort);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxReleaseWindow, &max_window);
+        Self::extend_persistent(&env, &DataKey::MaxReleaseWindow);
+    }
+
+    /// Register the deployed OnboardingContract address so the escrow contract
+    /// can make cross-contract reputation / metrics updates (admin only).
+    pub fn set_onboarding_contract(env: Env, contract_address: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::OnboardingContractAddress, &contract_address);
+        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+    }
+
     pub fn initialize(
         env: Env,
         platform_wallet: Address,
@@ -533,7 +603,7 @@ impl EscrowContract {
     /// Propose a new administrator for the platform (admin only).
     /// Starts the two-step transfer process (#95).
     pub fn update_admin(env: Env, new_admin: Address) {
-        let mut config = Self::get_platform_config(env.clone());
+        let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
         config.pending_admin = Some(new_admin);
@@ -544,7 +614,7 @@ impl EscrowContract {
     /// Claim the administrative role (pending admin only).
     /// Completes the two-step transfer process (#95).
     pub fn claim_admin(env: Env) {
-        let mut config = Self::get_platform_config(env.clone());
+        let mut config = Self::get_platform_config_internal(&env);
         let pending = config.pending_admin.as_ref().expect("No pending admin");
         pending.require_auth();
 
@@ -615,7 +685,7 @@ impl EscrowContract {
         }
 
         // Check artisan (seller) stake requirement (Issue #99)
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         if config.min_stake_required > 0 {
             let artisan_stake: i128 = env
                 .storage()
@@ -629,6 +699,16 @@ impl EscrowContract {
 
         // Default to 7 days if not specified
         let window = release_window.unwrap_or(604800u32);
+
+        // Validate release window bounds (#67)
+        if window == 0 {
+            env.panic_with_error(Error::ReleaseWindowTooShort);
+        }
+        let max_window = Self::get_max_release_window(&env);
+        if window > max_window {
+            env.panic_with_error(Error::ReleaseWindowTooLong);
+        }
+
         let created_at_u64 = env.ledger().timestamp();
         assert!(
             created_at_u64 <= u32::MAX as u64,
@@ -799,7 +879,7 @@ impl EscrowContract {
         }
 
         // Get platform config
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
 
         // Calculate platform fee
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -844,6 +924,13 @@ impl EscrowContract {
             },
         );
         Self::exit_reentry_guard(&env);
+
+        // Update reputation and activity metrics in onboarding contract (#100, #63)
+        if let Some(client) = Self::get_onboarding_client(&env) {
+            client.update_reputation(&escrow.seller, &1u32, &0u32);
+            client.update_reputation(&escrow.buyer, &1u32, &0u32);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+        }
     }
 
     /// Auto-release funds after release window (seller can call)
@@ -871,7 +958,7 @@ impl EscrowContract {
         }
 
         // Get platform config
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
 
         // Calculate platform fee
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -916,6 +1003,13 @@ impl EscrowContract {
             },
         );
         Self::exit_reentry_guard(&env);
+
+        // Update reputation and activity metrics in onboarding contract (#100, #63)
+        if let Some(client) = Self::get_onboarding_client(&env) {
+            client.update_reputation(&escrow.seller, &1u32, &0u32);
+            client.update_reputation(&escrow.buyer, &1u32, &0u32);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+        }
     }
 
     /// Extend the release window for an escrow (only buyer can call)
@@ -1094,11 +1188,18 @@ impl EscrowContract {
             },
         );
         Self::exit_reentry_guard(&env);
+
+        // Buyer wins refund (successful for buyer, disputed for seller) (#100, #63)
+        if let Some(client) = Self::get_onboarding_client(&env) {
+            client.update_reputation(&escrow.buyer, &1u32, &0u32);
+            client.update_reputation(&escrow.seller, &0u32, &1u32);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+        }
         Ok(())
     }
 
     fn release_funds_to_seller(env: &Env, escrow: &Escrow) {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(env);
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
@@ -1278,6 +1379,24 @@ impl EscrowContract {
             },
         );
         Self::exit_reentry_guard(&env);
+
+        // Update reputation based on resolution outcome (#100, #63)
+        if let Some(client) = Self::get_onboarding_client(&env) {
+            match resolution {
+                Resolution::ReleaseToSeller => {
+                    // Seller wins dispute: successful for seller, disputed for buyer
+                    client.update_reputation(&escrow.seller, &1u32, &0u32);
+                    client.update_reputation(&escrow.buyer, &0u32, &1u32);
+                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+                }
+                Resolution::RefundToBuyer => {
+                    // Buyer wins dispute: successful for buyer, disputed for seller
+                    client.update_reputation(&escrow.buyer, &1u32, &0u32);
+                    client.update_reputation(&escrow.seller, &0u32, &1u32);
+                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+                }
+            }
+        }
     }
 
     /// Update platform fee percentage (admin only)
@@ -1285,7 +1404,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `new_fee_bps` - New fee in basis points
     pub fn update_platform_fee(env: Env, new_fee_bps: u32) {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
         if !(new_fee_bps <= MAX_PLATFORM_FEE_BPS) {
@@ -1311,7 +1430,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `new_wallet` - New platform wallet address
     pub fn update_platform_wallet(env: Env, new_wallet: Address) {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
         let new_config = PlatformConfig {
@@ -1347,13 +1466,13 @@ impl EscrowContract {
 
     /// Get current platform fee percentage
     pub fn get_platform_fee(env: Env) -> u32 {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         config.platform_fee_bps
     }
 
     /// Get platform wallet address
     pub fn get_platform_wallet(env: Env) -> Address {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         config.platform_wallet
     }
 
@@ -1371,7 +1490,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `amount` - The escrow amount
     pub fn calculate_fee_for_amount(env: Env, amount: i128) -> i128 {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         Self::calculate_fee(amount, config.platform_fee_bps)
     }
 
@@ -1399,6 +1518,16 @@ impl EscrowContract {
         // Validate buyer and seller are different
         if params.buyer == params.seller {
             return Err(Error::SameBuyerSeller);
+        }
+
+        // Validate release window bounds (#67)
+        let window = params.release_window.unwrap_or(604800u32);
+        if window == 0 {
+            return Err(Error::ReleaseWindowTooShort);
+        }
+        let max_window = Self::get_max_release_window(env);
+        if window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
         }
 
         // Validate IPFS hash if provided
@@ -1627,7 +1756,7 @@ impl EscrowContract {
 
                 if let Some(mut escrow) = escrow_opt {
                     // Get platform config
-                    let config = Self::get_platform_config(env.clone());
+                    let config = Self::get_platform_config_internal(&env);
 
                     // Calculate platform fee
                     let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -1715,7 +1844,7 @@ impl EscrowContract {
         let admin = Self::get_admin(&env).unwrap();
         admin.require_auth();
 
-        let mut config = Self::get_platform_config(env.clone());
+        let mut config = Self::get_platform_config_internal(&env);
         config.is_paused = paused;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
@@ -1723,7 +1852,7 @@ impl EscrowContract {
 
     /// View: check if contract is paused.
     pub fn is_paused(env: Env) -> bool {
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         config.is_paused
     }
 
@@ -1750,7 +1879,7 @@ impl EscrowContract {
             Self::extend_persistent(&env, &key);
             fee
         } else {
-            let config = Self::get_platform_config(env.clone());
+            let config = Self::get_platform_config_internal(&env);
             config.platform_fee_bps
         }
     }
@@ -1917,7 +2046,7 @@ impl EscrowContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        let mut config = Self::get_platform_config(env.clone());
+        let mut config = Self::get_platform_config_internal(&env);
         config.min_stake_required = min_stake;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
@@ -2048,7 +2177,7 @@ impl EscrowContract {
         let seller_gross = escrow.amount - refund_amount;
 
         // Deduct platform fee from seller's portion
-        let config = Self::get_platform_config(env.clone());
+        let config = Self::get_platform_config_internal(&env);
         let fee_amount = Self::calculate_fee(seller_gross, config.platform_fee_bps);
         let seller_net = seller_gross - fee_amount;
 

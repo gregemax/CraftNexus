@@ -435,3 +435,260 @@ fn test_is_verified() {
 
     assert!(client.is_verified(&user));
 }
+
+// ============================================================
+// Issue #63 – Artisan Verification Logic Enhancement
+// ============================================================
+
+/// Reputation counters are zero for a freshly onboarded user.
+#[test]
+fn test_new_user_has_zero_reputation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "artisan1"), &UserRole::Artisan);
+
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 0);
+    assert_eq!(disputed, 0);
+}
+
+/// get_user_metrics returns zeroed struct for a user with no recorded activity.
+#[test]
+fn test_get_user_metrics_defaults_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty"), &UserRole::Artisan);
+
+    let metrics = client.get_user_metrics(&user);
+    assert_eq!(metrics.total_escrow_count, 0);
+    assert_eq!(metrics.total_volume, 0);
+}
+
+/// auto_verify_user returns false (no-op) when thresholds are not yet met.
+#[test]
+fn test_auto_verify_not_triggered_below_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty2"), &UserRole::Artisan);
+
+    // No metrics recorded yet – should not verify
+    let verified = client.auto_verify_user(&user);
+    assert!(!verified);
+    assert!(!client.is_verified(&user));
+}
+
+/// update_user_metrics triggers auto-verification once thresholds are crossed.
+#[test]
+fn test_auto_verify_triggers_on_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty3"), &UserRole::Artisan);
+
+    // Default thresholds: 5 escrows and 10_000_000_000 volume.
+    // Call update_user_metrics with enough to cross both thresholds.
+    client.update_user_metrics(&user, &5u32, &10_000_000_000i128);
+
+    // Should now be auto-verified
+    assert!(client.is_verified(&user));
+
+    let metrics = client.get_user_metrics(&user);
+    assert_eq!(metrics.total_escrow_count, 5);
+    assert_eq!(metrics.total_volume, 10_000_000_000);
+}
+
+/// auto_verify_user is a no-op on an already verified user.
+#[test]
+fn test_auto_verify_no_op_when_already_verified() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty4"), &UserRole::Artisan);
+
+    // Manual admin verification
+    client.verify_user(&user);
+    assert!(client.is_verified(&user));
+
+    // Public auto_verify should be a no-op
+    let result = client.auto_verify_user(&user);
+    assert!(!result); // false because already verified
+}
+
+/// Manual verification override still works regardless of metrics.
+#[test]
+fn test_manual_verification_override() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty5"), &UserRole::Artisan);
+
+    // No metrics, but admin verifies manually
+    client.verify_user(&user);
+    assert!(client.is_verified(&user));
+}
+
+/// Verification thresholds can be updated by admin.
+#[test]
+fn test_configurable_thresholds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "arty6"), &UserRole::Artisan);
+
+    // Lower thresholds to 1 escrow and 1 unit of volume
+    client.set_verification_thresholds(&1u32, &1i128);
+
+    // Providing minimal metrics should now trigger auto-verification
+    client.update_user_metrics(&user, &1u32, &1i128);
+    assert!(client.is_verified(&user));
+}
+
+/// request_verification adds the user to the queue exactly once.
+#[test]
+fn test_request_verification_queue() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "queued1"), &UserRole::Artisan);
+
+    client.request_verification(&user);
+
+    let queue = client.get_verification_queue();
+    assert_eq!(queue.len(), 1);
+
+    // Calling again is idempotent
+    client.request_verification(&user);
+    let queue2 = client.get_verification_queue();
+    assert_eq!(queue2.len(), 1);
+}
+
+/// process_verification_request with approve=true verifies the user and clears queue.
+#[test]
+fn test_process_verification_request_approve() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "queued2"), &UserRole::Artisan);
+
+    client.request_verification(&user);
+    client.process_verification_request(&user, &true);
+
+    assert!(client.is_verified(&user));
+
+    // Queue should now be empty
+    let queue = client.get_verification_queue();
+    assert_eq!(queue.len(), 0);
+}
+
+/// process_verification_request with approve=false leaves user unverified.
+#[test]
+fn test_process_verification_request_reject() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "queued3"), &UserRole::Artisan);
+
+    client.request_verification(&user);
+    client.process_verification_request(&user, &false);
+
+    assert!(!client.is_verified(&user));
+    let queue = client.get_verification_queue();
+    assert_eq!(queue.len(), 0);
+}
+
+/// Verification history is tracked across request, approve, and auto-verify actions.
+#[test]
+fn test_verification_history_tracking() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "hist1"), &UserRole::Artisan);
+
+    // Request → Approve
+    client.request_verification(&user);
+    client.process_verification_request(&user, &true);
+
+    let history = client.get_verification_history(&user);
+    assert!(history.len() >= 2);
+}
+
+// ============================================================
+// Issue #100 – Reputation System (Trust Score)
+// ============================================================
+
+/// update_reputation increments successful_trades and disputed_trades correctly.
+#[test]
+fn test_update_reputation_increments_counters() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &2u32, &1u32);
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 2);
+    assert_eq!(disputed, 1);
+
+    // Increments are additive
+    client.update_reputation(&user, &1u32, &0u32);
+    let (successful2, disputed2) = client.get_user_reputation(&user);
+    assert_eq!(successful2, 3);
+    assert_eq!(disputed2, 1);
+}
+
+/// get_user_reputation returns (0, 0) for an unknown address.
+#[test]
+fn test_get_user_reputation_unknown_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let unknown = Address::generate(&env);
+
+    let (successful, disputed) = client.get_user_reputation(&unknown);
+    assert_eq!(successful, 0);
+    assert_eq!(disputed, 0);
+}
+
+/// update_reputation on an unknown address silently skips without panicking.
+#[test]
+fn test_update_reputation_unknown_address_is_no_op() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let unknown = Address::generate(&env);
+
+    // Should not panic
+    client.update_reputation(&unknown, &1u32, &0u32);
+    let (successful, disputed) = client.get_user_reputation(&unknown);
+    assert_eq!(successful, 0);
+    assert_eq!(disputed, 0);
+}
