@@ -532,11 +532,7 @@ impl OnboardingContract {
     /// true if user has onboarded, false otherwise
     pub fn is_onboarded(env: Env, user: Address) -> bool {
         let key = DataKey::UserProfile(user.clone());
-        let has = env.storage().persistent().has(&key);
-        if has {
-            let _ = Self::get_user_profile(&env, user);
-        }
-        has
+        env.storage().persistent().has(&key)
     }
 
     /// Get user's role
